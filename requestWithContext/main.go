@@ -51,9 +51,10 @@ func server(ctx context.Context) {
 }
 
 func hello(w http.ResponseWriter, r *http.Request) {
+
 	// this line leads to memory leak.
 	// we should not use *http.Request as a key of global request variables.
-	r = r.WithContext(context.Background())
+	// r = r.WithContext(context.Background())
 
 	authenticate(r)
 	// some codes
