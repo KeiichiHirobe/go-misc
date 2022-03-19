@@ -23,6 +23,8 @@ func GetUserID(r *http.Request) int {
 }
 
 func Clear(r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
 	delete(data, r)
 }
 
