@@ -1,6 +1,6 @@
 `data.go` use `*http.Request` as a key of global request variables. It's a bad implementation because there is a chance to lead to memory leaks.
 `main.go` show that situation. Every request to server allocates about 1KB memory that GC can not recover.
-These codes explain well why we should not use https://github.com/gorilla/context which is archived now.
+These codes explain well why we should not use https://github.com/gorilla/context which has been archived now.
 
 
 ```
