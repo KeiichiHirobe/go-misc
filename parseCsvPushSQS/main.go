@@ -84,7 +84,8 @@ func GetQueueURL(client *sqsSdk.SQS, queue *string) (*sqs.GetQueueUrlOutput, err
 	return result, nil
 }
 
-// 183s/10000record
+// 183s/10000record from my laptop
+// 107s/10000record
 func SendMsg(client *sqsSdk.SQS, queueURL *string, message string) error {
 	_, err := client.SendMessage(&sqs.SendMessageInput{
 		DelaySeconds: aws.Int64(10),
@@ -111,7 +112,8 @@ func SendMsg(client *sqsSdk.SQS, queueURL *string, message string) error {
 	return nil
 }
 
-// 29s/10000record
+// 29s/10000record from my laptop
+// 19s/10000record from EC2
 func SendBatchMsg(client *sqsSdk.SQS, queueURL *string, messages []string, ids []string) error {
 	var entries []*sqs.SendMessageBatchRequestEntry
 	for idx, message := range messages {
