@@ -161,8 +161,12 @@ func main() {
 		fmt.Println("You must supply the name of a queue (-q QUEUE)")
 		return
 	}
+	endpoint := "https://sqs.ap-northeast-1.amazonaws.com"
 	sess := session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable,
+		Config: aws.Config{
+			Endpoint: &endpoint,
+		},
 	}))
 	client := sqs.New(sess)
 	// Get URL of queue
