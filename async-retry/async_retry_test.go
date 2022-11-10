@@ -333,7 +333,7 @@ func Test_asyncRetry_DoAndShutdown(t *testing.T) {
 		var err error
 		select {
 		case err = <-shutdownErr:
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Second * 10):
 			t.Errorf("Do must stop waiting")
 		}
 		if err != nil {

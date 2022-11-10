@@ -45,43 +45,44 @@ func (a *asyncRetry) Do(f AsyncRetryFunc, ctx context.Context, opts ...Option) (
 	for _, opt := range opts {
 		opt(&config)
 	}
+
 	defer func() {
 		if err := recover(); err != nil {
 			retErr = fmt.Errorf("panicking while AsyncRetry err: %v", err)
 		}
 	}()
 
-	baseCtx := WithoutCancel(ctx)
+	ctx, cancel := context.WithCancel(WithoutCancel(ctx))
+	defer cancel()
 	noMoreRetryCtx, noMoreRetry := context.WithCancel(config.context)
 	defer noMoreRetry()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-a.shutdownChan:
+			noMoreRetry()
+			if config.cancelWhenShutdown {
+				cancel()
+			}
+		case <-config.context.Done():
+			if config.cancelWhenConfigContextCanceled {
+				cancel()
+			}
+		// release resources
+		case <-done:
+		}
+	}()
+
 	return retry.Do(
 		func() error {
-			done := make(chan struct{})
-			var ctx context.Context
-			var cancel context.CancelFunc
 			if config.timeout > 0 {
-				ctx, cancel = context.WithTimeout(baseCtx, config.timeout)
-			} else {
-				ctx, cancel = context.WithCancel(baseCtx)
+				var timeoutCancel context.CancelFunc
+				ctx, timeoutCancel = context.WithTimeout(ctx, config.timeout)
+				defer timeoutCancel()
 			}
-			defer func() {
-				close(done)
-				cancel()
-			}()
-			go func() {
-				select {
-				case <-a.shutdownChan:
-					noMoreRetry()
-					if config.cancelWhenShutdown {
-						cancel()
-					}
-				case <-config.context.Done():
-					if config.cancelWhenConfigContextCanceled {
-						cancel()
-					}
-				case <-done:
-				}
-			}()
 			return f(ctx)
 		},
 		retry.Attempts(config.attempts),
@@ -107,16 +108,14 @@ func (a *asyncRetry) Shutdown(ctx context.Context) error {
 	ch := make(chan struct{})
 	go func() {
 		a.wg.Wait()
-		<-ch
+		close(ch)
 	}()
 
-	var err error
 	select {
 	case <-ch:
 	case <-ctx.Done():
-		err = ctx.Err()
 	}
-	return err
+	return ctx.Err()
 }
 
 // Unrecoverable wraps error.
