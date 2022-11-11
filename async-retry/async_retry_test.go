@@ -3,6 +3,8 @@ package asyncretry
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"sync"
 	"testing"
 	"time"
 )
@@ -195,15 +197,15 @@ func Test_asyncRetry_DoWithConfigContext(t *testing.T) {
 		if err := a.Do(
 			func(ctx context.Context) error {
 				counter++
-				if counter == 1 {
-					cancel()
-				}
 				return fmt.Errorf("always error")
 			},
 			context.Background(),
 			Context(ctx),
 			Delay(time.Minute),
 			CancelWhenConfigContextCanceled(true),
+			OnRetry(func(n uint, err error) {
+				cancel()
+			}),
 		); err == nil || err.Error() != expectedErrorMsg {
 			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
 		}
@@ -221,15 +223,15 @@ func Test_asyncRetry_DoWithConfigContext(t *testing.T) {
 		if err := a.Do(
 			func(ctx context.Context) error {
 				counter++
-				if counter == 1 {
-					cancel()
-				}
 				return fmt.Errorf("always error")
 			},
 			context.Background(),
 			Context(ctx),
 			Delay(time.Minute),
 			CancelWhenConfigContextCanceled(false),
+			OnRetry(func(n uint, err error) {
+				cancel()
+			}),
 		); err == nil || err.Error() != expectedErrorMsg {
 			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
 		}
@@ -241,37 +243,35 @@ func Test_asyncRetry_DoWithConfigContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		a := NewAsyncRetry()
 		var counter = 0
-		// fixme: this error message is wrong due to retry-go bug
-		var expectedErrorMsg = `All attempts fail:
-#1: context canceled`
 		if err := a.Do(
 			func(ctx context.Context) error {
 				counter++
 				if counter == 1 {
 					cancel()
 				}
-				<-ctx.Done()
-				return fmt.Errorf("argument context canceled")
+				select {
+				case <-time.After(time.Second):
+					return fmt.Errorf("context must be canceled")
+				case <-ctx.Done():
+					return nil
+				}
 			},
 			context.Background(),
 			Context(ctx),
 			Timeout(0),
 			Delay(time.Minute),
 			CancelWhenConfigContextCanceled(true),
-		); err == nil || err.Error() != expectedErrorMsg {
-			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
+		); err != nil {
+			t.Errorf("Do() error = %v, wantErr %v", err, nil)
 		}
 		if counter != 1 {
 			t.Errorf("Do() mismatch called count actutal: %v, expected: %v", counter, 1)
 		}
 	})
-	t.Run("Context, argument of AsyncRetryFunc is NOT canceled when CancelWhenConfigContextCanceled is true", func(t *testing.T) {
+	t.Run("Context, argument of AsyncRetryFunc is NOT canceled when CancelWhenConfigContextCanceled is false", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		a := NewAsyncRetry()
 		var counter = 0
-		// fixme: this error message is wrong due to retry-go bug
-		var expectedErrorMsg = `All attempts fail:
-#1: context canceled`
 		if err := a.Do(
 			func(ctx context.Context) error {
 				counter++
@@ -280,9 +280,9 @@ func Test_asyncRetry_DoWithConfigContext(t *testing.T) {
 				}
 				select {
 				case <-ctx.Done():
-					return fmt.Errorf("argument context canceled")
+					return fmt.Errorf("context must not be canceled")
 				case <-time.After(time.Second):
-					return fmt.Errorf("too long action")
+					return nil
 				}
 			},
 			context.Background(),
@@ -290,8 +290,8 @@ func Test_asyncRetry_DoWithConfigContext(t *testing.T) {
 			Timeout(0),
 			Delay(time.Minute),
 			CancelWhenConfigContextCanceled(false),
-		); err == nil || err.Error() != expectedErrorMsg {
-			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
+		); err != nil {
+			t.Errorf("Do() error = %v, wantErr %v", err, nil)
 		}
 		if counter != 1 {
 			t.Errorf("Do() mismatch called count actutal: %v, expected: %v", counter, 1)
@@ -300,7 +300,7 @@ func Test_asyncRetry_DoWithConfigContext(t *testing.T) {
 }
 
 func Test_asyncRetry_DoAndShutdown(t *testing.T) {
-	t.Run("Stop Retry at shutdown when CancelWhenShutdown is true", func(t *testing.T) {
+	t.Run("Stop Retry in shutdown when CancelWhenShutdown is true", func(t *testing.T) {
 		var ch = make(chan struct{})
 		a := NewAsyncRetry()
 		var counter = 0
@@ -313,10 +313,118 @@ func Test_asyncRetry_DoAndShutdown(t *testing.T) {
 			doErr <- a.Do(
 				func(ctx context.Context) error {
 					counter++
+					return fmt.Errorf("always error")
+				},
+				context.Background(),
+				Context(context.Background()),
+				Delay(time.Minute),
+				CancelWhenShutdown(true),
+				OnRetry(func(n uint, err error) {
+					if n == 0 {
+						close(ch)
+					}
+				}),
+			)
+		}()
+		go func() {
+			// wait until Do is called
+			<-ch
+			shutdownErr <- a.Shutdown(context.Background())
+		}()
+
+		var err error
+		select {
+		case err = <-shutdownErr:
+		case <-time.After(time.Second * 10):
+			t.Errorf("Do must not wait for next try")
+		}
+		if err != nil {
+			t.Errorf("Shutdown() error = %v, wantErr %v", err, nil)
+		}
+		select {
+		case err = <-doErr:
+		default:
+			t.Errorf("Do must be finished before Shutdown")
+		}
+		if err == nil || err.Error() != expectedErrorMsg {
+			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
+		}
+		if counter != 1 {
+			t.Errorf("Do() mismatch called count actutal: %v, expected: %v", counter, 1)
+		}
+	})
+	t.Run("Stop Retry in shutdown when CancelWhenShutdown is false", func(t *testing.T) {
+		var ch = make(chan struct{})
+		a := NewAsyncRetry()
+		var counter = 0
+		var doErr = make(chan error)
+		var shutdownErr = make(chan error)
+		// fixme: this error message is wrong due to retry-go bug
+		var expectedErrorMsg = `All attempts fail:
+#1: context canceled`
+		go func() {
+			doErr <- a.Do(
+				func(ctx context.Context) error {
+					counter++
+					return fmt.Errorf("always error")
+				},
+				context.Background(),
+				Context(context.Background()),
+				Delay(time.Minute),
+				CancelWhenShutdown(false),
+				OnRetry(func(n uint, err error) {
+					if n == 0 {
+						close(ch)
+					}
+				}),
+			)
+		}()
+		go func() {
+			// wait until Do is called
+			<-ch
+			shutdownErr <- a.Shutdown(context.Background())
+		}()
+
+		var err error
+		select {
+		case err = <-shutdownErr:
+		case <-time.After(time.Second * 10):
+			t.Errorf("Do must not wait for next try")
+		}
+		if err != nil {
+			t.Errorf("Shutdown() error = %v, wantErr %v", err, nil)
+		}
+		select {
+		case err = <-doErr:
+		default:
+			t.Errorf("Do must be finished before Shutdown")
+		}
+		if err == nil || err.Error() != expectedErrorMsg {
+			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
+		}
+		if counter != 1 {
+			t.Errorf("Do() mismatch called count actutal: %v, expected: %v", counter, 1)
+		}
+	})
+	t.Run("Context, argument of AsyncRetryFunc is canceled when CancelWhenShutdown is true", func(t *testing.T) {
+		var ch = make(chan struct{})
+		a := NewAsyncRetry()
+		var counter = 0
+		var doErr = make(chan error)
+		var shutdownErr = make(chan error)
+		go func() {
+			doErr <- a.Do(
+				func(ctx context.Context) error {
+					counter++
 					if counter == 1 {
 						close(ch)
 					}
-					return fmt.Errorf("always error")
+					select {
+					case <-time.After(time.Second):
+						return fmt.Errorf("context must be canceled")
+					case <-ctx.Done():
+						return nil
+					}
 				},
 				context.Background(),
 				Context(context.Background()),
@@ -334,7 +442,7 @@ func Test_asyncRetry_DoAndShutdown(t *testing.T) {
 		select {
 		case err = <-shutdownErr:
 		case <-time.After(time.Second * 10):
-			t.Errorf("Do must stop waiting")
+			t.Errorf("too long")
 		}
 		if err != nil {
 			t.Errorf("Shutdown() error = %v, wantErr %v", err, nil)
@@ -344,11 +452,149 @@ func Test_asyncRetry_DoAndShutdown(t *testing.T) {
 		default:
 			t.Errorf("Do must be finished before Shutdown")
 		}
-		if err == nil || err.Error() != expectedErrorMsg {
-			t.Errorf("Do() error = %v, wantErr %v", err, expectedErrorMsg)
+		if err != nil {
+			t.Errorf("Do() error = %v, wantErr %v", err, nil)
 		}
 		if counter != 1 {
 			t.Errorf("Do() mismatch called count actutal: %v, expected: %v", counter, 1)
 		}
 	})
+	t.Run("Context, argument of AsyncRetryFunc is canceled when CancelWhenShutdown is false", func(t *testing.T) {
+		var ch = make(chan struct{})
+		a := NewAsyncRetry()
+		var counter = 0
+		var doErr = make(chan error)
+		var shutdownErr = make(chan error)
+		go func() {
+			doErr <- a.Do(
+				func(ctx context.Context) error {
+					counter++
+					if counter == 1 {
+						close(ch)
+					}
+					select {
+					case <-ctx.Done():
+						return fmt.Errorf("context must not be canceled")
+					case <-time.After(time.Second):
+						return nil
+					}
+				},
+				context.Background(),
+				Context(context.Background()),
+				Delay(time.Minute),
+				CancelWhenShutdown(false),
+			)
+		}()
+		go func() {
+			// wait until Do is called
+			<-ch
+			shutdownErr <- a.Shutdown(context.Background())
+		}()
+
+		var err error
+		select {
+		case err = <-shutdownErr:
+		case <-time.After(time.Second * 10):
+			t.Errorf("too long")
+		}
+		if err != nil {
+			t.Errorf("Shutdown() error = %v, wantErr %v", err, nil)
+		}
+		select {
+		case err = <-doErr:
+		default:
+			t.Errorf("Do must be finished before Shutdown")
+		}
+		if err != nil {
+			t.Errorf("Do() error = %v, wantErr %v", err, nil)
+		}
+		if counter != 1 {
+			t.Errorf("Do() mismatch called count actutal: %v, expected: %v", counter, 1)
+		}
+	})
+}
+
+func Test_ShutdownOrder(t *testing.T) {
+	type args struct {
+		f    AsyncRetryFunc
+		ctx  func() context.Context
+		opts []Option
+	}
+	tests := []struct {
+		name       string
+		szDo       int
+		szShutdown int
+	}{
+		{
+			"Calls of Do which happens before call of shutdown blocks shutdown, and calls of Do which happen after call of shutdown return InShutdownErr",
+			1000,
+			1,
+		},
+		{
+			"Multiple shutdown call is OK",
+			1000,
+			100,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			szDo := tt.szDo
+			szShutdown := tt.szShutdown
+			var results = make(chan int)
+			a := NewAsyncRetry()
+			var wg sync.WaitGroup
+			for i := 0; i < szDo; i++ {
+				wg.Add(1)
+				go func() {
+					err := a.Do(
+						func(ctx context.Context) error {
+							wg.Done()
+							time.Sleep(time.Millisecond * time.Duration(rand.Intn(1000)))
+							results <- 1
+							return nil
+						},
+						context.Background(),
+						Timeout(0),
+					)
+					if err != nil {
+						t.Errorf("Do() error = %v, wantErr %v", err, nil)
+					}
+				}()
+			}
+			for i := 0; i < szShutdown; i++ {
+				go func() {
+					wg.Wait()
+					err := a.Shutdown(context.Background())
+					results <- 2
+					if err != nil {
+						t.Errorf("Shutdown() error = %v, wantErr %v", err, nil)
+					}
+				}()
+			}
+			i := 0
+			for i < szDo+szShutdown {
+				v := <-results
+				if i < szDo {
+					if v != 1 {
+						t.Errorf("must be 1")
+					}
+				} else {
+					if v != 2 {
+						t.Errorf("must be 2")
+					}
+				}
+				i++
+			}
+			// after shutdown
+			err := a.Do(
+				func(ctx context.Context) error {
+					return nil
+				},
+				context.Background(),
+			)
+			if err == nil || err.Error() != InShutdownErr.Error() {
+				t.Errorf("call of Do after shudown must returns InShutdownErr")
+			}
+		})
+	}
 }
