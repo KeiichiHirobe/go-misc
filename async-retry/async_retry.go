@@ -16,6 +16,7 @@ type AsyncRetry interface {
 }
 
 type asyncRetry struct {
+	// FIXME use RWMutex instead
 	mu           sync.Mutex // guards wg and shutdownChan
 	wg           sync.WaitGroup
 	shutdownChan chan struct{}
